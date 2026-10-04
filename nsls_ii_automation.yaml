@@ -1,0 +1,13 @@
+- id: "nsls_ii_refresh_schedule_countdown"
+  alias: "NSLS-II - Refresh schedule countdown"
+  description: "Keep the NSLS-II TimeFlow countdown synchronized with Brookhaven's operating schedule."
+  use_blueprint:
+    path: nsls_ii/nsls_ii_timeflow.yaml
+    input:
+      current_status: input_text.nsls_ii_current_status
+      next_status: input_text.nsls_ii_next_status
+      countdown_started: input_datetime.nsls_ii_countdown_started
+      next_transition: input_datetime.nsls_ii_next_transition
+      notify_on_change: true
+      notification_targets:
+        - notify.carrie_iphone

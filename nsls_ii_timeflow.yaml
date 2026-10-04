@@ -1,0 +1,255 @@
+blueprint:
+  name: NSLS-II schedule countdown for TimeFlow
+  description: 'Version 1.1.2. Fetch Brookhaven''s scheduled NSLS-II operating status
+    and
+
+    update four persistent helpers for a TimeFlow gridy countdown.
+
+
+    REQUIRED SETUP: Configure rest_command.nsls_ii_fetch_current_status with
+
+    url https://www.bnl.gov/nsls2/schedule/fetch-current-status.php, method GET,
+
+    timeout 30, and restart Home Assistant. Create two Text helpers (maximum
+
+    length at least 64) and two Date and/or time helpers with BOTH date and time.
+
+    Select all four below. Run the resulting automation once to initialize it.
+
+
+    Store each published transition plus a fixed 30-second grace period in the
+
+    existing next-transition helper. Refresh at that stored time, at Home
+
+    Assistant startup, and once daily at 03:00:30 in your HA timezone. The
+
+    displayed countdown also includes the grace period; notification dates
+
+    quote the published transition without it. No extra helper, variable, or
+
+    input is needed. Unchanged refreshes preserve the countdown start.
+
+
+    Failed requests or invalid responses preserve all previous helper values
+
+    and mark the trace failed. This is the operating SCHEDULE, not live beam
+
+    availability. Brookhaven dates are interpreted in US Eastern time (modern
+
+    US DST rules), independently of your HA timezone.
+
+
+    OPTIONAL NOTIFICATIONS: Enable status-change notifications and select one
+
+    or more notify entities. This same automation sends a message only when a
+
+    previously known current status changes after a successful fetch. Initial
+
+    setup, unchanged refreshes, and next-status/date revisions are silent.
+
+    A change discovered after HA was offline sends one catch-up notification.
+
+
+    Distribution: copy this file into blueprints/automation/nsls_ii/ and follow
+
+    the accompanying README and TimeFlow card example. A blueprint cannot
+
+    create the required REST command, helpers, or dashboard card itself.
+
+    Add source_url under blueprint after publishing this file at a real URL.
+
+    '
+  domain: automation
+  homeassistant:
+    min_version: 2024.10.0
+  input:
+    current_status:
+      name: Current status text helper
+      description: A dedicated input_text helper with maximum length at least 64.
+      selector:
+        entity:
+          filter:
+          - domain:
+            - input_text
+          multiple: false
+          reorder: false
+    next_status:
+      name: Next status text helper
+      description: A different dedicated input_text helper with maximum length at
+        least 64.
+      selector:
+        entity:
+          filter:
+          - domain:
+            - input_text
+          multiple: false
+          reorder: false
+    countdown_started:
+      name: Countdown start datetime helper
+      description: A dedicated input_datetime helper with BOTH date and time enabled.
+      selector:
+        entity:
+          filter:
+          - domain:
+            - input_datetime
+          multiple: false
+          reorder: false
+    next_transition:
+      name: Next transition datetime helper
+      description: A different input_datetime helper with BOTH date and time enabled.
+        Stores the published transition plus 30 seconds.
+      selector:
+        entity:
+          filter:
+          - domain:
+            - input_datetime
+          multiple: false
+          reorder: false
+    notify_on_change:
+      name: Enable status-change notifications
+      description: Notify only when the current status changes. Select notification
+        devices below.
+      default: false
+      selector:
+        boolean: {}
+    notification_targets:
+      name: Notification devices
+      description: One or more notify entities, such as your Companion app phone.
+        Empty disables sending.
+      default: []
+      selector:
+        entity:
+          filter:
+          - domain:
+            - notify
+          multiple: true
+          reorder: false
+mode: single
+max_exceeded: silent
+variables:
+  current_status_entity: !input current_status
+  next_status_entity: !input next_status
+  countdown_started_entity: !input countdown_started
+  next_transition_entity: !input next_transition
+  notification_targets: !input notification_targets
+triggers:
+- trigger: time
+  at: !input next_transition
+  id: transition
+- trigger: homeassistant
+  event: start
+  id: startup
+- trigger: time
+  at: 03:00:30
+  id: recovery
+actions:
+- alias: Reject duplicate helpers and datetime helpers without date and time
+  if:
+  - condition: template
+    value_template: "{{ current_status_entity == next_status_entity\n   or countdown_started_entity
+      == next_transition_entity\n   or not state_attr(countdown_started_entity, 'has_date')\n
+      \  or not state_attr(countdown_started_entity, 'has_time')\n   or not state_attr(next_transition_entity,
+      'has_date')\n   or not state_attr(next_transition_entity, 'has_time')\n   or
+      state_attr(current_status_entity, 'max') | int(0) < 64\n   or state_attr(next_status_entity,
+      'max') | int(0) < 64 }}"
+  then:
+  - stop: 'Choose four distinct helpers: Text max >= 64; datetimes require date AND
+      time.'
+    error: true
+- alias: Fetch the NSLS-II operating schedule status
+  action: rest_command.nsls_ii_fetch_current_status
+  response_variable: nsls_response
+- alias: Extract status labels and transition date from the HTML response
+  variables:
+    response_ok: "{{ nsls_response is mapping and nsls_response.get('status', 0) ==
+      200\n   and nsls_response.get('content') is string }}"
+    response_html: '{{ nsls_response.get(''content'', '''') if response_ok else ''''
+      }}'
+    status_labels: "{{ response_html | regex_findall('<span[^>]*>([^<]+)</span>',
+      ignorecase=true)\n   | map('trim') | list }}"
+    date_labels: "{{ response_html | regex_findall('<strong[^>]*>([^<]+)</strong>',
+      ignorecase=true)\n   | map('trim') | list }}"
+    parsed_current: '{{ status_labels[0] if status_labels | count == 2 else '''' }}'
+    parsed_next: '{{ status_labels[1] if status_labels | count == 2 else '''' }}'
+    parsed_date: '{{ date_labels[0] if date_labels | count == 2 else '''' }}'
+    parsed_time: "{{ (date_labels[1] | lower | replace('.', '') | trim)\n   if date_labels
+      | count == 2 else '' }}"
+- alias: Resolve the year and convert US Eastern time to a timezone-aware timestamp
+  variables:
+    transition_timestamp: "{% set result = namespace(ts=0) %} {% set allowed = ['Operations',
+      'Studies', 'Maintenance',\n                  'Interlock Certification', 'Shutdown',
+      'Unspecified'] %}\n{% set normalized_time = '12 am' if parsed_time == 'midnight'\n
+      \    else '12 pm' if parsed_time == 'noon' else parsed_time %}\n{% set clock_format
+      = '%I:%M %p' if ':' in normalized_time else '%I %p' %} {% if response_ok and
+      parsed_current in allowed and parsed_next in allowed %}\n  {% for year in [utcnow().year
+      - 1, utcnow().year, utcnow().year + 1] %}\n    {% set local = strptime(parsed_date
+      ~ ' ' ~ year ~ ' ' ~ normalized_time,\n                           '%A, %B %d
+      %Y ' ~ clock_format, none) %}\n    {% if local is not none and local.strftime('%A,
+      %B') == parsed_date.split(' ')[0] ~ ' ' ~ parsed_date.split(' ')[1] %}\n      {%
+      set march = local.replace(month=3, day=1, hour=2, minute=0, second=0) %}\n      {%
+      set november = local.replace(month=11, day=1, hour=2, minute=0, second=0) %}\n
+      \     {% set dst_start = march + timedelta(days=(6 - march.weekday()) % 7 +
+      7) %}\n      {% set dst_end = november + timedelta(days=(6 - november.weekday())
+      % 7) %}\n      {% set offset = '-04:00' if dst_start <= local < dst_end else
+      '-05:00' %}\n      {% set aware = as_datetime(local.strftime('%Y-%m-%dT%H:%M:%S')
+      ~ offset, none) %}\n      {% set ts = as_timestamp(aware, 0) %}\n      {% if
+      ts > as_timestamp(now()) and ts - as_timestamp(now()) < 370 * 86400\n            and
+      (result.ts == 0 or ts < result.ts) %}\n        {% set result.ts = ts %}\n      {%
+      endif %}\n    {% endif %}\n  {% endfor %}\n{% endif %} {{ result.ts }}"
+- alias: Preserve last valid data when the HTTP response or date cannot be parsed
+  if:
+  - condition: template
+    value_template: '{{ transition_timestamp | float(0) <= 0 }}'
+  then:
+  - stop: BNL returned an invalid status/date, a stale transition, or a non-200 response.
+      Helpers preserved; next daily recovery check at 03:00:30 local time.
+    error: true
+- alias: Capture the previous status before updating helpers
+  variables:
+    previous_status: '{{ states(current_status_entity) }}'
+- alias: Start a new dot countdown only for a new or revised schedule
+  if:
+  - condition: template
+    value_template: "{{ previous_status != parsed_current\n   or states(next_status_entity)
+      != parsed_next\n   or ((state_attr(next_transition_entity, 'timestamp') | float(0))\n
+      \      - ((transition_timestamp | float(0)) + 30)) | abs > 1\n   or not has_value(countdown_started_entity)
+      }}"
+  then:
+  - action: input_datetime.set_datetime
+    target:
+      entity_id: !input countdown_started
+    data:
+      timestamp: '{{ as_timestamp(now()) | int }}'
+- action: input_text.set_value
+  target:
+    entity_id: !input current_status
+  data:
+    value: '{{ parsed_current }}'
+- action: input_text.set_value
+  target:
+    entity_id: !input next_status
+  data:
+    value: '{{ parsed_next }}'
+- alias: Store the published transition plus 30 seconds and arm the next time trigger
+  action: input_datetime.set_datetime
+  target:
+    entity_id: !input next_transition
+  data:
+    timestamp: '{{ (transition_timestamp | int) + 30 }}'
+- alias: Optionally notify only about a genuine current-status change
+  enabled: !input notify_on_change
+  if:
+  - condition: template
+    value_template: "{{ notification_targets | count > 0\n   and previous_status in
+      ['Operations', 'Studies', 'Maintenance',\n                           'Interlock
+      Certification', 'Shutdown', 'Unspecified']\n   and previous_status != parsed_current
+      }}"
+  then:
+  - action: notify.send_message
+    target:
+      entity_id: !input notification_targets
+    data:
+      title: NSLS-II status changed
+      message: 'NSLS-II scheduled status changed from {{ previous_status }} to {{
+        parsed_current }}. Next: {{ parsed_next }} on {{ transition_timestamp | timestamp_custom(''%a
+        %b %-d at %-I:%M %p %Z'', true) }}.'
